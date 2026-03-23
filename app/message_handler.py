@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from collections import defaultdict, deque
@@ -99,9 +100,18 @@ class MessageHandler:
     # Rate limiting
     # ------------------------------------------------------------------
 
-    def _can_reply(self, key: str) -> bool:
-        elapsed = time.time() - self._last_reply.get(key, 0.0)
-        return elapsed >= self._config.rate_limit_seconds
+    def _reserve_slot(self, key: str) -> float:
+        """Atomically reserve the reply slot and return seconds to wait.
+
+        The slot is claimed immediately so that concurrent coroutines
+        see it as taken and queue behind it instead of both firing at once.
+        """
+        now = time.time()
+        last = self._last_reply.get(key, 0.0)
+        wait = max(0.0, self._config.rate_limit_seconds - (now - last))
+        # Reserve: next reply must wait from (now + wait), not from now
+        self._last_reply[key] = now + wait
+        return wait
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -169,10 +179,11 @@ class MessageHandler:
             logger.debug("[SKIP] no trigger: %.80s", text)
             return
 
-        # Rate limit
-        if not self._can_reply(key):
-            logger.info("Rate-limited, skipping reply for key=%s", key)
-            return
+        # Reserve rate-limit slot; sleep if previous reply was too recent
+        wait = self._reserve_slot(key)
+        if wait > 0:
+            logger.info("Rate-limit: waiting %.1fs before replying (key=%s)", wait, key)
+            await asyncio.sleep(wait)
 
         # Build prompt from context (exclude the message we just added,
         # because build() appends it as the current turn)
@@ -214,8 +225,8 @@ class MessageHandler:
             logger.error("Failed to send message: %s", exc)
             return
 
-        # Persist our reply in context and update rate-limit timestamp
+        # Persist our reply in context
+        # (_last_reply was already set by _reserve_slot before the sleep)
         self._context[key].append(
             ContextMessage(role="assistant", content=reply_text)
         )
-        self._last_reply[key] = time.time()
