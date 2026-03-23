@@ -213,6 +213,15 @@ class MessageHandler:
 
         logger.debug("[GIGACHAT RESPONSE] %.300s", reply_text)
 
+        # Simulate typing: duration = chars / 4 seconds
+        typing_seconds = len(reply_text) / 4
+        logger.debug("[TYPING] %.1fs (%d chars)", typing_seconds, len(reply_text))
+        try:
+            async with self._client.action(message.chat_id, "typing"):
+                await asyncio.sleep(typing_seconds)
+        except Exception as exc:
+            logger.debug("Typing action failed (non-fatal): %s", exc)
+
         # Send message (reply keeps us in the same topic thread)
         try:
             await self._client.send_message(
@@ -220,7 +229,7 @@ class MessageHandler:
                 reply_text,
                 reply_to=message.id,
             )
-            logger.info("Sent reply: %.80s", reply_text)
+            logger.info("Sent reply (%.1fs typing delay): %.80s", typing_seconds, reply_text)
         except Exception as exc:
             logger.error("Failed to send message: %s", exc)
             return
