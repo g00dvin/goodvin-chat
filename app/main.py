@@ -1,0 +1,60 @@
+import asyncio
+import logging
+
+from .config import Config
+from .gigachat_client import GigaChatClient
+from .message_handler import MessageHandler
+from .telegram_client import create_client, register_handlers
+from .utils import setup_logging, setup_signal_handlers
+
+logger = logging.getLogger(__name__)
+
+
+async def run() -> None:
+    config = Config.from_env()
+    setup_logging(debug=config.debug)
+
+    if config.debug:
+        logger.debug("DEBUG mode enabled")
+
+    logger.info(
+        "Configuration loaded (chat_id=%s, topic_id=%s, debug=%s)",
+        config.chat_id, config.topic_id, config.debug,
+    )
+
+    gigachat = GigaChatClient(
+        auth_key=config.gigachat_auth_key,
+        scope=config.gigachat_scope,
+        model=config.gigachat_model,
+        proxy=config.gigachat_proxy,
+    )
+
+    await gigachat.check_connection()  # non-fatal: logs error but does not stop startup
+
+    client = create_client(config)
+    handler = MessageHandler(client, gigachat, config)
+
+    async def shutdown() -> None:
+        logger.info("Shutting down...")
+        await client.disconnect()
+        await gigachat.close()
+
+    setup_signal_handlers(shutdown)
+
+    async with client:
+        await client.start()
+        await handler.initialize()
+        await register_handlers(client, handler, config)
+        logger.info("Userbot is running. Press Ctrl+C to stop.")
+        await client.run_until_disconnected()
+
+    await gigachat.close()
+    logger.info("Userbot stopped.")
+
+
+def main() -> None:
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

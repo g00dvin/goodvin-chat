@@ -1,0 +1,15 @@
+services:
+  userbot:
+    build: .
+    restart: on-failure:5
+    env_file: .env
+    network_mode: host
+    volumes:
+      # Persist file-based Telethon session across restarts.
+      # Not needed when TG_SESSION contains a StringSession string.
+      - ./sessions:/app/sessions
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
