@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict, deque
+from collections import deque
 from typing import Optional
 
 from telethon import TelegramClient
@@ -27,48 +27,49 @@ class MessageHandler:
         self._prompt_builder = PromptBuilder(
             config.system_prompt, config.max_context_messages
         )
-        # Dialogue context keyed by "chat_id:topic_id"
-        self._context: dict[str, deque[ContextMessage]] = defaultdict(
-            lambda: deque(maxlen=config.max_context_messages * 2)
-        )
-        # Last reply timestamp per key (rate-limiting)
+
+        # Thread contexts: thread_key → conversation history
+        # A thread starts on the first trigger and grows as users reply to us.
+        self._threads: dict[str, deque[ContextMessage]] = {}
+
+        # Our sent messages: sent_msg_id → thread_key
+        # Used to detect when someone replies to our message (thread continuation).
+        self._our_messages: dict[int, str] = {}
+
+        # Rate-limit slots per thread_key
         self._last_reply: dict[str, float] = {}
+
         self._me: Optional[User] = None
 
     async def initialize(self) -> None:
         self._me = await self._client.get_me()
-        logger.info(
-            "Logged in as @%s (id=%s)", self._me.username, self._me.id
-        )
+        logger.info("Logged in as @%s (id=%s)", self._me.username, self._me.id)
 
     # ------------------------------------------------------------------
     # Topic helpers
     # ------------------------------------------------------------------
 
     def _get_message_topic_id(self, message: Message) -> Optional[int]:
-        """Return the forum topic id the message belongs to, or None."""
         rt = getattr(message, "reply_to", None)
         if rt is None:
             return None
         top_id = getattr(rt, "reply_to_top_id", None)
         if top_id:
             return top_id
-        # Topic header message: forum_topic=True, id == reply_to_msg_id
         if getattr(rt, "forum_topic", False):
             return getattr(rt, "reply_to_msg_id", None)
         return None
 
     def _is_in_target_topic(self, message: Message) -> bool:
         if self._config.topic_id is None:
-            return True  # No topic filter configured
+            return True
         topic_id = self._get_message_topic_id(message)
-        # "General" topic (id=1) messages have no reply_to
         if self._config.topic_id == 1 and topic_id is None:
             return True
         return topic_id == self._config.topic_id
 
-    def _context_key(self, chat_id: int, topic_id: Optional[int]) -> str:
-        return f"{chat_id}:{topic_id or 0}"
+    def _thread_key(self, chat_id: int, topic_id: Optional[int], root_msg_id: int) -> str:
+        return f"{chat_id}:{topic_id or 0}:{root_msg_id}"
 
     # ------------------------------------------------------------------
     # Trigger detection
@@ -83,14 +84,13 @@ class MessageHandler:
             return False
         return f"@{self._me.username}".lower() in text.lower()
 
-    async def _is_reply_to_me(self, message: Message) -> bool:
+    async def _is_reply_to_me_via_api(self, message: Message) -> bool:
+        """Fallback check for replies to our messages sent before the bot started."""
         reply_to_id = getattr(message, "reply_to_msg_id", None)
         if not reply_to_id:
             return False
         try:
-            replied = await self._client.get_messages(
-                message.chat_id, ids=reply_to_id
-            )
+            replied = await self._client.get_messages(message.chat_id, ids=reply_to_id)
             return replied is not None and replied.sender_id == self._me.id
         except Exception as exc:
             logger.error("Could not fetch replied-to message: %s", exc)
@@ -101,17 +101,53 @@ class MessageHandler:
     # ------------------------------------------------------------------
 
     def _reserve_slot(self, key: str) -> float:
-        """Atomically reserve the reply slot and return seconds to wait.
+        """Claim the reply slot immediately; return seconds to wait.
 
-        The slot is claimed immediately so that concurrent coroutines
-        see it as taken and queue behind it instead of both firing at once.
+        Reserving upfront prevents concurrent coroutines from both
+        passing the rate check before either finishes.
         """
         now = time.time()
         last = self._last_reply.get(key, 0.0)
         wait = max(0.0, self._config.rate_limit_seconds - (now - last))
-        # Reserve: next reply must wait from (now + wait), not from now
         self._last_reply[key] = now + wait
         return wait
+
+    # ------------------------------------------------------------------
+    # Thread resolution
+    # ------------------------------------------------------------------
+
+    async def _resolve_thread(
+        self, message: Message, topic_id: Optional[int]
+    ) -> tuple[Optional[str], str]:
+        """Return (thread_key, trigger_reason) or (None, "") if not triggered."""
+        reply_to_id = getattr(message, "reply_to_msg_id", None)
+        text = getattr(message, "text", "") or getattr(message, "message", "") or ""
+
+        # Priority 1: reply to one of our tracked messages → continue that thread
+        if reply_to_id and reply_to_id in self._our_messages:
+            thread_key = self._our_messages[reply_to_id]
+            logger.info("Thread continuation (reply→msg %d): %.60s", reply_to_id, text)
+            return thread_key, "reply"
+
+        # Priority 2: @mention → new thread
+        if self._mentions_me(text):
+            key = self._thread_key(message.chat_id, topic_id, message.id)
+            logger.info("New thread (@mention): %.60s", text)
+            return key, "mention"
+
+        # Priority 3: trigger word → new thread
+        if self._has_trigger_word(text):
+            key = self._thread_key(message.chat_id, topic_id, message.id)
+            logger.info("New thread (trigger word): %.60s", text)
+            return key, "trigger_word"
+
+        # Priority 4: reply to our old message not in memory (e.g. after restart) → new thread
+        if reply_to_id and await self._is_reply_to_me_via_api(message):
+            key = self._thread_key(message.chat_id, topic_id, message.id)
+            logger.info("New thread (reply to pre-start msg %d): %.60s", reply_to_id, text)
+            return key, "reply_old"
+
+        return None, ""
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -121,7 +157,6 @@ class MessageHandler:
         if self._me is None:
             return
 
-        # Ignore our own messages
         if message.sender_id == self._me.id:
             return
 
@@ -136,12 +171,19 @@ class MessageHandler:
             message.chat_id, topic_id, message.id, message.sender_id, text,
         )
 
-        # Topic filter
         if not self._is_in_target_topic(message):
             logger.debug("[SKIP] topic %s != target %s", topic_id, self._config.topic_id)
             return
 
-        key = self._context_key(message.chat_id, topic_id)
+        # Resolve thread
+        thread_key, trigger_reason = await self._resolve_thread(message, topic_id)
+        if thread_key is None:
+            logger.debug("[SKIP] no trigger: %.80s", text)
+            return
+
+        # Ensure thread context exists
+        if thread_key not in self._threads:
+            self._threads[thread_key] = deque(maxlen=self._config.max_context_messages * 2)
 
         # Resolve sender display name
         sender = ""
@@ -153,46 +195,25 @@ class MessageHandler:
                 or ""
             )
 
-        # Add message to rolling context before deciding to reply
-        self._context[key].append(
+        # Add incoming message to thread
+        self._threads[thread_key].append(
             ContextMessage(role="user", content=text, sender=sender)
         )
 
-        # Decide whether to respond
-        should_reply = False
-        trigger_reason = ""
-
-        if self._has_trigger_word(text):
-            logger.info("Trigger word matched: %.60s", text)
-            should_reply = True
-            trigger_reason = "trigger_word"
-        elif self._mentions_me(text):
-            logger.info("Bot mentioned by username: %.60s", text)
-            should_reply = True
-            trigger_reason = "mention"
-        elif await self._is_reply_to_me(message):
-            logger.info("Reply to our message: %.60s", text)
-            should_reply = True
-            trigger_reason = "reply"
-
-        if not should_reply:
-            logger.debug("[SKIP] no trigger: %.80s", text)
-            return
-
-        # Reserve rate-limit slot; sleep if previous reply was too recent
-        wait = self._reserve_slot(key)
+        # Rate limit per thread
+        wait = self._reserve_slot(thread_key)
         if wait > 0:
-            logger.info("Rate-limit: waiting %.1fs before replying (key=%s)", wait, key)
+            logger.info("Rate-limit: waiting %.1fs (thread=%s)", wait, thread_key)
             await asyncio.sleep(wait)
 
-        # Build prompt from context (exclude the message we just added,
-        # because build() appends it as the current turn)
-        context_snapshot = list(self._context[key])[:-1]
+        # Build prompt from this thread's history (exclude the just-added message)
+        context_snapshot = list(self._threads[thread_key])[:-1]
         prompt = self._prompt_builder.build(context_snapshot, text, sender)
 
         logger.debug(
-            "[GIGACHAT REQUEST] trigger=%s context_msgs=%d prompt_turns=%d\n%s",
+            "[GIGACHAT REQUEST] trigger=%s thread=%s history=%d prompt_turns=%d\n%s",
             trigger_reason,
+            thread_key,
             len(context_snapshot),
             len(prompt),
             "\n".join(
@@ -222,20 +243,25 @@ class MessageHandler:
         except Exception as exc:
             logger.debug("Typing action failed (non-fatal): %s", exc)
 
-        # Send message (reply keeps us in the same topic thread)
+        # Send message
         try:
-            await self._client.send_message(
+            sent = await self._client.send_message(
                 message.chat_id,
                 reply_text,
                 reply_to=message.id,
             )
-            logger.info("Sent reply (%.1fs typing delay): %.80s", typing_seconds, reply_text)
+            logger.info(
+                "Sent reply (%.1fs typing, thread=%s): %.80s",
+                typing_seconds, thread_key, reply_text,
+            )
         except Exception as exc:
             logger.error("Failed to send message: %s", exc)
             return
 
-        # Persist our reply in context
-        # (_last_reply was already set by _reserve_slot before the sleep)
-        self._context[key].append(
+        # Register our message so future replies to it continue this thread
+        self._our_messages[sent.id] = thread_key
+
+        # Add our reply to thread context
+        self._threads[thread_key].append(
             ContextMessage(role="assistant", content=reply_text)
         )
