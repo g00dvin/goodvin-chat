@@ -135,6 +135,86 @@ class GigaChatClient:
             f"GigaChat failed after {max_retries} attempts"
         ) from last_exc
 
+    async def chat_with_file(
+        self,
+        question: str,
+        file_id: str,
+        system_prompt: Optional[str] = None,
+        max_retries: int = 3,
+    ) -> str:
+        """Send a question with a GigaChat file attachment and return the reply.
+
+        Uses function_call=auto so the model can search the document content.
+        """
+        messages: list[dict] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({
+            "role": "user",
+            "content": question,
+            "attachments": [file_id],
+        })
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                await self._ensure_token()
+                headers = {
+                    "Authorization": f"Bearer {self._access_token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                }
+                payload = {
+                    "model": self._model,
+                    "messages": messages,
+                    "function_call": "auto",
+                    "max_tokens": 1024,
+                    "temperature": 0.3,
+                }
+                logger.debug(
+                    "[CHAT_FILE] POST %s model=%s file_id=%s question=%.100s",
+                    _CHAT_URL, self._model, file_id, question,
+                )
+                response = await self._http.post(
+                    _CHAT_URL, headers=headers, json=payload
+                )
+                logger.debug("[CHAT_FILE] response %s", response.status_code)
+                if response.status_code == 401:
+                    self._access_token = None
+                response.raise_for_status()
+                result = response.json()
+                choice = result["choices"][0]
+                text = choice["message"]["content"].strip()
+                finish = choice.get("finish_reason", "")
+                usage = result.get("usage", {})
+                logger.debug(
+                    "[CHAT_FILE] finish=%s tokens(prompt=%s completion=%s) response=%.200s",
+                    finish,
+                    usage.get("prompt_tokens", "?"),
+                    usage.get("completion_tokens", "?"),
+                    text,
+                )
+                return text
+            except httpx.HTTPStatusError as exc:
+                logger.error(
+                    "GigaChat file-chat HTTP error (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
+            except Exception as exc:
+                logger.error(
+                    "GigaChat file-chat failed (attempt %d/%d): %s",
+                    attempt + 1, max_retries, exc,
+                )
+                last_exc = exc
+
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+
+        raise RuntimeError(
+            f"GigaChat file-chat failed after {max_retries} attempts"
+        ) from last_exc
+
     # ------------------------------------------------------------------
     # Models & health check
     # ------------------------------------------------------------------

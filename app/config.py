@@ -28,6 +28,13 @@ class Config:
     gigachat_model: str
     gigachat_proxy: Optional[str]  # e.g. "http://user:pass@host:port" or "socks5://..."
 
+    # Mode
+    # "dialog"  — thread-based conversation (default)
+    # "file_qa" — answer questions about an uploaded GigaChat file
+    bot_mode: str
+    bot_name: str          # name used to trigger file_qa ("Кирилл, подскажи ...")
+    gigachat_file_id: Optional[str]  # required when bot_mode == "file_qa"
+
     # Debug
     debug: bool
 
@@ -59,5 +66,8 @@ class Config:
             gigachat_scope=os.environ.get("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),
             gigachat_model=os.environ.get("GIGACHAT_MODEL", "GigaChat"),
             gigachat_proxy=os.environ.get("GIGACHAT_PROXY") or None,
+            bot_mode=os.environ.get("BOT_MODE", "dialog").strip().lower(),
+            bot_name=os.environ.get("BOT_NAME", "Кирилл").strip(),
+            gigachat_file_id=os.environ.get("GIGACHAT_FILE_ID") or None,
             debug=os.environ.get("DEBUG", "0").strip() == "1",
         )

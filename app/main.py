@@ -18,9 +18,25 @@ async def run() -> None:
         logger.debug("DEBUG mode enabled")
 
     logger.info(
-        "Configuration loaded (chat_id=%s, topic_id=%s, debug=%s)",
-        config.chat_id, config.topic_id, config.debug,
+        "Configuration loaded (chat_id=%s, topic_id=%s, mode=%s, debug=%s)",
+        config.chat_id, config.topic_id, config.bot_mode, config.debug,
     )
+
+    if config.bot_mode == "file_qa":
+        if not config.gigachat_file_id:
+            logger.error(
+                "BOT_MODE=file_qa but GIGACHAT_FILE_ID is not set. "
+                "Run: python upload_file.py <your_file> to get the file_id."
+            )
+        else:
+            logger.info(
+                "file_qa mode: trigger='%s, подскажи ...' file_id=%s",
+                config.bot_name, config.gigachat_file_id,
+            )
+    elif config.bot_mode == "dialog":
+        logger.info("dialog mode: trigger_words=%s", config.trigger_words)
+    else:
+        logger.warning("Unknown BOT_MODE='%s', defaulting to dialog", config.bot_mode)
 
     gigachat = GigaChatClient(
         auth_key=config.gigachat_auth_key,

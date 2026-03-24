@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 from collections import deque
 from typing import Optional
@@ -40,6 +41,13 @@ class MessageHandler:
         self._last_reply: dict[str, float] = {}
 
         self._me: Optional[User] = None
+
+        # file_qa mode: compiled trigger pattern "Кирилл, подскажи <вопрос>"
+        name = re.escape(config.bot_name)
+        self._file_qa_pattern = re.compile(
+            rf"^{name}[,\s]+подскажи\s+(.+)",
+            re.IGNORECASE | re.DOTALL,
+        )
 
     async def initialize(self) -> None:
         self._me = await self._client.get_me()
@@ -150,6 +158,60 @@ class MessageHandler:
         return None, ""
 
     # ------------------------------------------------------------------
+    # File Q&A mode
+    # ------------------------------------------------------------------
+
+    async def _handle_file_qa(self, message: Message, question: str) -> None:
+        """Answer a single question using the configured GigaChat file."""
+        file_id = self._config.gigachat_file_id
+        if not file_id:
+            logger.error("file_qa mode: GIGACHAT_FILE_ID is not set")
+            return
+
+        rate_key = f"file_qa:{message.chat_id}"
+        wait = self._reserve_slot(rate_key)
+        if wait > 0:
+            logger.info("Rate-limit: waiting %.1fs (file_qa)", wait)
+            await asyncio.sleep(wait)
+
+        logger.info("[FILE_QA] file_id=%s question=%.100s", file_id, question)
+
+        try:
+            reply_text = await self._gigachat.chat_with_file(
+                question=question,
+                file_id=file_id,
+                system_prompt=self._config.system_prompt,
+            )
+        except Exception as exc:
+            logger.error("GigaChat file-chat failed: %s", exc)
+            return
+
+        if not reply_text:
+            return
+
+        logger.debug("[FILE_QA RESPONSE] %.300s", reply_text)
+
+        typing_seconds = len(reply_text) / 4
+        try:
+            async with self._client.action(message.chat_id, "typing"):
+                await asyncio.sleep(typing_seconds)
+        except Exception as exc:
+            logger.debug("Typing action failed (non-fatal): %s", exc)
+
+        try:
+            await self._client.send_message(
+                message.chat_id,
+                reply_text,
+                reply_to=message.id,
+            )
+            logger.info(
+                "[FILE_QA] Sent reply (%.1fs typing): %.80s",
+                typing_seconds, reply_text,
+            )
+        except Exception as exc:
+            logger.error("Failed to send file_qa reply: %s", exc)
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -173,6 +235,16 @@ class MessageHandler:
 
         if not self._is_in_target_topic(message):
             logger.debug("[SKIP] topic %s != target %s", topic_id, self._config.topic_id)
+            return
+
+        # Route to the correct mode
+        if self._config.bot_mode == "file_qa":
+            match = self._file_qa_pattern.match(text.strip())
+            if match:
+                question = match.group(1).strip()
+                await self._handle_file_qa(message, question)
+            else:
+                logger.debug("[FILE_QA SKIP] pattern not matched: %.80s", text)
             return
 
         # Resolve thread
