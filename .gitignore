@@ -4,3 +4,7 @@ pyvenv.cfg
 bin/
 include/
 .env
+cityray_manual.pdf
+cityray_text.pdf
+.gitignore
+convert.sh
