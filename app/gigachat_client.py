@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 _AUTH_URL   = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 _CHAT_URL   = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 _MODELS_URL = "https://gigachat.devices.sberbank.ru/api/v1/models"
+_FILES_URL  = "https://gigachat.devices.sberbank.ru/api/v1/files"
+
+# Models that support file attachments (function_call=auto)
+_FILE_CAPABLE_MODELS = {"GigaChat-Pro", "GigaChat-2-Max", "GigaChat-Max"}
 
 
 class GigaChatClient:
@@ -171,14 +175,16 @@ class GigaChatClient:
                     "max_tokens": 1024,
                     "temperature": 0.3,
                 }
+                import json as _json
                 logger.debug(
-                    "[CHAT_FILE] POST %s model=%s file_id=%s question=%.100s",
-                    _CHAT_URL, self._model, file_id, question,
+                    "[CHAT_FILE] POST %s\npayload=%s",
+                    _CHAT_URL,
+                    _json.dumps(payload, ensure_ascii=False),
                 )
                 response = await self._http.post(
                     _CHAT_URL, headers=headers, json=payload
                 )
-                logger.debug("[CHAT_FILE] response %s", response.status_code)
+                logger.debug("[CHAT_FILE] response %s body=%.500s", response.status_code, response.text)
                 if response.status_code == 401:
                     self._access_token = None
                 response.raise_for_status()
@@ -263,6 +269,32 @@ class GigaChatClient:
             logger.error("Could not fetch model list: %s", exc)
 
         return True
+
+    async def check_file(self, file_id: str) -> Optional[dict]:
+        """Return file metadata from GET /files/{file_id}, or None on error.
+
+        Useful at startup to confirm the file is accessible before answering questions.
+        """
+        await self._ensure_token()
+        headers = {"Authorization": f"Bearer {self._access_token}", "Accept": "application/json"}
+        url = f"{_FILES_URL}/{file_id}"
+        try:
+            response = await self._http.get(url, headers=headers)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            logger.error("Could not fetch file metadata for %s: %s", file_id, exc)
+            return None
+
+    def warn_if_file_unsupported(self) -> None:
+        """Log a warning if the configured model likely doesn't support file attachments."""
+        if self._model not in _FILE_CAPABLE_MODELS:
+            logger.warning(
+                "Model '%s' may NOT support file attachments (function_call=auto). "
+                "For reliable file Q&A use GigaChat-Pro or GigaChat-2-Max. "
+                "Set GIGACHAT_MODEL=GigaChat-Pro in .env",
+                self._model,
+            )
 
     async def close(self) -> None:
         await self._http.aclose()

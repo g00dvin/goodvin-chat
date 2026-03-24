@@ -47,6 +47,21 @@ async def run() -> None:
 
     await gigachat.check_connection()  # non-fatal: logs error but does not stop startup
 
+    if config.bot_mode == "file_qa" and config.gigachat_file_id:
+        gigachat.warn_if_file_unsupported()
+        meta = await gigachat.check_file(config.gigachat_file_id)
+        if meta:
+            logger.info(
+                "File OK — id=%s name=%s bytes=%s",
+                meta.get("id"), meta.get("filename"), meta.get("bytes"),
+            )
+        else:
+            logger.warning(
+                "Could not verify file_id=%s — it may be expired or belong to a different account. "
+                "Re-upload with: python upload_file.py <your_file>",
+                config.gigachat_file_id,
+            )
+
     client = create_client(config)
     handler = MessageHandler(client, gigachat, config)
 
