@@ -37,6 +37,15 @@ _FILES_URL = "https://gigachat.devices.sberbank.ru/api/v1/files"
 
 _FILE_CAPABLE_MODELS = {"GigaChat-Pro", "GigaChat-2-Max", "GigaChat-Max", "GigaChat-2-Pro"}
 
+# System prompt used for file Q&A — instructions must be in the SYSTEM message,
+# not mixed into the user message content alongside the question.
+_FILE_QA_SYSTEM = (
+    "Ты — ассистент, отвечающий на вопросы только по загруженному руководству.\n"
+    "Не используй внешние знания, не добавляй информацию от себя.\n"
+    "Если ответ не найден в файле, напиши: «Информация отсутствует в руководстве».\n"
+    "Формулируй ответы кратко и по делу."
+)
+
 log = logging.getLogger("test_file_qa")
 
 
@@ -166,7 +175,8 @@ async def main(debug: bool) -> None:
     model     = os.environ.get("GIGACHAT_MODEL", "GigaChat").strip()
     file_id   = os.environ.get("GIGACHAT_FILE_ID", "").strip()
     proxy     = os.environ.get("GIGACHAT_PROXY", "").strip() or None
-    sys_prompt = os.environ.get("SYSTEM_PROMPT", "").strip() or None
+    # Always use the file Q&A system prompt — SYSTEM_PROMPT from .env is for dialog mode
+    sys_prompt = _FILE_QA_SYSTEM
 
     # Validate required vars
     missing = [k for k, v in [("GIGACHAT_AUTH_KEY", auth_key), ("GIGACHAT_FILE_ID", file_id)] if not v]

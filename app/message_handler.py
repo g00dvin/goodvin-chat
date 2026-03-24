@@ -14,11 +14,11 @@ from .prompt_builder import ContextMessage, PromptBuilder
 
 logger = logging.getLogger(__name__)
 
-_FILE_QA_PROMPT = (
+_FILE_QA_SYSTEM = (
     "Ты — ассистент, отвечающий на вопросы только по загруженному руководству.\n"
     "Не используй внешние знания, не добавляй информацию от себя.\n"
     "Если ответ не найден в файле, напиши: «Информация отсутствует в руководстве».\n"
-    "Формулируй ответы кратко и по делу. Вопрос - {question}"
+    "Формулируй ответы кратко и по делу."
 )
 
 
@@ -181,14 +181,13 @@ class MessageHandler:
             logger.info("Rate-limit: waiting %.1fs (file_qa)", wait)
             await asyncio.sleep(wait)
 
-        full_prompt = _FILE_QA_PROMPT.format(question=question)
         logger.info("[FILE_QA] file_id=%s question=%.100s", file_id, question)
-        logger.debug("[FILE_QA PROMPT]\n%s", full_prompt)
 
         try:
             reply_text = await self._gigachat.chat_with_file(
-                question=full_prompt,
+                question=question,
                 file_id=file_id,
+                system_prompt=_FILE_QA_SYSTEM,
             )
         except Exception as exc:
             logger.error("GigaChat file-chat failed: %s", exc)
