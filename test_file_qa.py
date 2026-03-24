@@ -133,8 +133,12 @@ class _Client:
         prompt_tok = usage.get("prompt_tokens", -1)
         if prompt_tok == 0:
             log.warning(
-                "[CHAT] prompt_tokens=0 — file content NOT loaded into context. "
-                "The file may still be indexing. Wait 1-3 min and retry."
+                "[CHAT] prompt_tokens=0 — GigaChat could not extract text from the file.\n"
+                "  Possible causes:\n"
+                "  1. Scanned/image-based PDF — GigaChat requires a text-layer PDF (not scanned)\n"
+                "     Check: pdftotext yourfile.pdf - | wc -c  (0 bytes = scanned)\n"
+                "  2. File expired — re-upload with: python upload_file.py <your_file>\n"
+                "  3. Model limitation — try GIGACHAT_MODEL=GigaChat-2-Max"
             )
         return text
 
@@ -189,24 +193,16 @@ async def main(debug: bool) -> None:
 
     # Verify file accessibility
     print("Checking file accessibility...", end=" ", flush=True)
-    file_ready = False
     try:
         meta = await client.check_file(file_id)
         if meta:
-            modalities = meta.get("modalities") or []
-            status = "indexed" if modalities else "indexing..."
+            bytes_val = meta.get("bytes")
+            bytes_str = f"{bytes_val:,}" if isinstance(bytes_val, int) else str(bytes_val)
             print(
                 f"OK  (name={meta.get('filename', '?')}  "
-                f"bytes={meta.get('bytes', '?'):,}  "
-                f"modalities={modalities or '[]'}  status={status})"
+                f"bytes={bytes_str}  "
+                f"modalities={meta.get('modalities') or []})"
             )
-            if not modalities:
-                print(
-                    "\n[WARN] modalities=[] — GigaChat is still indexing the file.\n"
-                    "       Large PDFs can take 1-3 minutes to process after upload.\n"
-                    "       If prompt_tokens=0 in responses, wait and retry.\n"
-                )
-            file_ready = True
         else:
             print("FAILED — file not found or expired.")
             print("[WARN] File may be expired. Re-upload with: python upload_file.py <your_file>")
